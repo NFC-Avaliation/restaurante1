@@ -33,20 +33,58 @@ function atualizarPainel() {
     io.emit('atualizacao_dados');
 }
 
-// 1. Cliente faz um Novo Pedido
-app.post('/api/pedidos', async (req, res) => {
-    const { mesa_numero, cart } = req.body;
-    
+// 0. Gerar ou recuperar Sessão Segura da Mesa (NFC)
+app.post('/api/mesa/sessao', async (req, res) => {
+    const { mesa_numero } = req.body;
     try {
         const client = await pool.connect();
+        const mesaRes = await client.query('SELECT id, status, token_sessao FROM mesas WHERE numero = $1', [mesa_numero]);
         
-        // Acha a mesa
-        const mesaRes = await client.query('SELECT id FROM mesas WHERE numero = $1', [mesa_numero]);
         if (mesaRes.rows.length === 0) {
             client.release();
             return res.status(404).json({ error: 'Mesa não encontrada' });
         }
-        const mesa_id = mesaRes.rows[0].id;
+
+        let mesa = mesaRes.rows[0];
+        let token = mesa.token_sessao;
+
+        // Se a mesa está livre ou não tem token ativo, gera um novo token de segurança
+        if (!token || mesa.status === 'livre') {
+            token = 'tok_' + Math.random().toString(36).substring(2) + Date.now().toString(36);
+            await client.query('UPDATE mesas SET token_sessao = $1 WHERE id = $2', [token, mesa.id]);
+        }
+
+        client.release();
+        res.json({ success: true, token_sessao: token });
+    } catch (error) {
+        console.error(error);
+        res.status(500).json({ error: 'Erro ao iniciar sessão da mesa' });
+    }
+});
+
+// 1. Cliente faz um Novo Pedido (com validação de token)
+app.post('/api/pedidos', async (req, res) => {
+    const { mesa_numero, cart, token_sessao } = req.body;
+    
+    try {
+        const client = await pool.connect();
+        
+        // Acha a mesa e valida o token de segurança
+        const mesaRes = await client.query('SELECT id, token_sessao, status FROM mesas WHERE numero = $1', [mesa_numero]);
+        if (mesaRes.rows.length === 0) {
+            client.release();
+            return res.status(404).json({ error: 'Mesa não encontrada' });
+        }
+        
+        const mesa = mesaRes.rows[0];
+
+        // Valida se o token do telemóvel corresponde ao token ativo da mesa
+        if (!mesa.token_sessao || mesa.token_sessao !== token_sessao) {
+            client.release();
+            return res.status(403).json({ error: 'Sessão inválida ou expirada para esta mesa.' });
+        }
+
+        const mesa_id = mesa.id;
 
         // Verifica se já tem comanda aberta, caso contrário cria uma
         let comandaRes = await client.query('SELECT id FROM comandas WHERE mesa_id = $1 AND status = $2', [mesa_id, 'aberta']);
@@ -85,15 +123,23 @@ app.post('/api/pedidos', async (req, res) => {
     }
 });
 
-// 2. Cliente Chama o Garçom
+// 2. Cliente Chama o Garçom (com validação de token)
 app.post('/api/garcom', async (req, res) => {
-    const { mesa_numero } = req.body;
+    const { mesa_numero, token_sessao } = req.body;
 
     try {
         const client = await pool.connect();
-        const mesaRes = await client.query('SELECT id FROM mesas WHERE numero = $1', [mesa_numero]);
+        const mesaRes = await client.query('SELECT id, token_sessao FROM mesas WHERE numero = $1', [mesa_numero]);
+        
         if (mesaRes.rows.length > 0) {
-            const mesa_id = mesaRes.rows[0].id;
+            const mesa = mesaRes.rows[0];
+            
+            if (!mesa.token_sessao || mesa.token_sessao !== token_sessao) {
+                client.release();
+                return res.status(403).json({ error: 'Sessão inválida.' });
+            }
+
+            const mesa_id = mesa.id;
             await client.query(
                 'UPDATE mesas SET chamando_garcom = TRUE, hora_ultimo_chamado = NOW() WHERE id = $1', 
                 [mesa_id]
@@ -163,7 +209,7 @@ app.post('/api/garcom/atender', async (req, res) => {
     }
 });
 
-// 5. Painel fecha a Comanda (Checkout)
+// 5. Painel fecha a Comanda (Checkout) e invalida o token da mesa
 app.post('/api/checkout', async (req, res) => {
     const { comanda_id, mesa_id, forma_pagamento, subtotal, taxa, desconto, final } = req.body;
     try {
@@ -177,7 +223,8 @@ app.post('/api/checkout', async (req, res) => {
             [forma_pagamento, subtotal, taxa, desconto, final, comanda_id]
         );
 
-        await client.query('UPDATE mesas SET status = $1, chamando_garcom = FALSE WHERE id = $2', ['livre', mesa_id]);
+        // Liberta a mesa, limpa chamadas e apaga o token de sessão (bloqueando acessos antigos)
+        await client.query('UPDATE mesas SET status = $1, chamando_garcom = FALSE, token_sessao = NULL WHERE id = $2', ['livre', mesa_id]);
         
         client.release();
         atualizarPainel();
