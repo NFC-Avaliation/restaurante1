@@ -225,18 +225,4 @@ app.post('/api/checkout', async (req, res) => {
         );
 
         // Liberta a mesa, limpa chamadas e apaga o token de sessão (bloqueando acessos antigos)
-        await client.query('UPDATE mesas SET status = $1, chamando_garcom = FALSE, token_sessao = NULL WHERE id = $2', ['livre', mesa_id]);
-        
-        client.release();
-        atualizarPainel();
-        res.json({ success: true });
-    } catch (error) {
-        console.error(error);
-        res.status(500).json({ error: 'Erro ao fechar comanda' });
-    }
-});
-
-const PORT = process.env.PORT || 3000;
-server.listen(PORT, () => {
-    console.log(`Servidor a correr na porta ${PORT}`);
-});
+        await client.query('UPDATE mesas SET status = $1, chamando_garcom = FALSE, token_sessao = NULL
