@@ -236,6 +236,90 @@ app.post('/api/checkout', async (req, res) => {
     }
 });
 
+// 6. Histórico de Pedidos / Comandas Fechadas
+app.get('/api/historico', async (req, res) => {
+    const { filtro } = req.query; // 'dia', 'semana', 'mes'
+    try {
+        const client = await pool.connect();
+        let query = `
+            SELECT c.*, m.numero as mesa_numero,
+            (SELECT json_agg(ci) FROM comanda_itens ci WHERE ci.comanda_id = c.id) as items
+            FROM comandas c 
+            JOIN mesas m ON c.mesa_id = m.id 
+            WHERE c.status = 'fechada'
+        `;
+        
+        if (filtro === 'dia') {
+            query += ` AND c.data_fechamento >= CURRENT_DATE`;
+        } else if (filtro === 'semana') {
+            query += ` AND c.data_fechamento >= NOW() - INTERVAL '7 days'`;
+        } else if (filtro === 'mes') {
+            query += ` AND c.data_fechamento >= NOW() - INTERVAL '30 days'`;
+        }
+        
+        query += ` ORDER BY c.data_fechamento DESC LIMIT 150`;
+
+        const result = await client.query(query);
+        client.release();
+        res.json(result.rows);
+    } catch (error) {
+        console.error(error);
+        res.status(500).json({ error: 'Erro ao buscar histórico' });
+    }
+});
+
+// 7. Estatísticas e Métricas
+app.get('/api/estatisticas', async (req, res) => {
+    try {
+        const client = await pool.connect();
+
+        const fatDia = await client.query(`SELECT SUM(valor_total_final) as total FROM comandas WHERE status = 'fechada' AND data_fechamento >= CURRENT_DATE`);
+        const fatSemana = await client.query(`SELECT SUM(valor_total_final) as total FROM comandas WHERE status = 'fechada' AND data_fechamento >= NOW() - INTERVAL '7 days'`);
+        const fatMes = await client.query(`SELECT SUM(valor_total_final) as total FROM comandas WHERE status = 'fechada' AND data_fechamento >= NOW() - INTERVAL '30 days'`);
+
+        const itensVendidos = await client.query(`
+            SELECT nome_item, SUM(quantidade) as total_qtd 
+            FROM comanda_itens ci
+            JOIN comandas c ON ci.comanda_id = c.id
+            WHERE c.status = 'fechada'
+            GROUP BY nome_item 
+            ORDER BY total_qtd DESC
+        `);
+
+        const horaPico = await client.query(`
+            SELECT EXTRACT(HOUR FROM data_abertura) as hora, COUNT(*) as qtd
+            FROM comandas
+            GROUP BY hora
+            ORDER BY qtd DESC
+            LIMIT 1
+        `);
+
+        const diaPico = await client.query(`
+            SELECT TO_CHAR(data_abertura, 'Day') as dia, COUNT(*) as qtd
+            FROM comandas
+            GROUP BY dia
+            ORDER BY qtd DESC
+            LIMIT 1
+        `);
+
+        client.release();
+
+        res.json({
+            faturamento: {
+                dia: fatDia.rows[0].total || 0,
+                semana: fatSemana.rows[0].total || 0,
+                mes: fatMes.rows[0].total || 0
+            },
+            itens: itensVendidos.rows,
+            horaPico: horaPico.rows.length > 0 ? `${Math.floor(horaPico.rows[0].hora)}:00` : 'N/A',
+            diaPico: diaPico.rows.length > 0 ? diaPico.rows[0].dia.trim() : 'N/A'
+        });
+    } catch (error) {
+        console.error(error);
+        res.status(500).json({ error: 'Erro ao calcular estatísticas' });
+    }
+});
+
 const PORT = process.env.PORT || 3000;
 server.listen(PORT, () => {
     console.log(`Servidor a correr na porta ${PORT}`);
