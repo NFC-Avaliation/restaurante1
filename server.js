@@ -204,7 +204,7 @@ app.post('/api/garcom/atender', async (req, res) => {
     }
 });
 
-// 5. Painel fecha a Comanda (Checkout) robusto e automático
+// 5. Painel fecha a Comanda (Checkout)
 app.post('/api/checkout', async (req, res) => {
     let { comanda_id, mesa_id, forma_pagamento, subtotal, taxa, desconto, final } = req.body;
     let client;
@@ -255,7 +255,97 @@ app.post('/api/checkout', async (req, res) => {
     }
 });
 
-// 6. Histórico de Pedidos / Comandas Fechadas (Blindado com LEFT JOIN)
+// NOVA ROTA ADMINISTRATIVA: Cancelar/Limpar Mesa sem ir para o histórico
+app.post('/api/admin/mesa/cancelar', async (req, res) => {
+    let { mesa_id, comanda_id } = req.body;
+    let client;
+    try {
+        client = await pool.connect();
+        
+        if (!comanda_id && mesa_id) {
+            const comRes = await client.query('SELECT id FROM comandas WHERE mesa_id = $1 AND (LOWER(status) = \'aberta\' OR status IS NULL)', [mesa_id]);
+            if (comRes.rows.length > 0) {
+                comanda_id = comRes.rows[0].id;
+            }
+        }
+
+        if (comanda_id) {
+            // Apaga itens e comanda para não gerar histórico nem estatísticas
+            await client.query('DELETE FROM comanda_itens WHERE comanda_id = $1', [comanda_id]);
+            await client.query('DELETE FROM comandas WHERE id = $1', [comanda_id]);
+        }
+
+        if (mesa_id) {
+            await client.query('UPDATE mesas SET status = $1, chamando_garcom = FALSE, token_sessao = NULL WHERE id = $2', ['livre', mesa_id]);
+        }
+
+        client.release();
+        atualizarPainel();
+        res.json({ success: true, message: 'Mesa cancelada e limpa com sucesso.' });
+    } catch (error) {
+        if (client) client.release();
+        console.error("Erro ao cancelar mesa:", error);
+        res.status(500).json({ error: 'Erro ao cancelar mesa' });
+    }
+});
+
+// NOVA ROTA ADMINISTRATIVA: Adicionar itens manualmente a uma mesa (mesmo vazia)
+app.post('/api/admin/mesa/adicionar-itens', async (req, res) => {
+    let { mesa_id, cart } = req.body;
+    let client;
+    try {
+        client = await pool.connect();
+
+        let comandaRes = await client.query('SELECT id FROM comandas WHERE mesa_id = $1 AND (LOWER(status) = \'aberta\' OR status IS NULL)', [mesa_id]);
+        let comanda_id;
+
+        if (comandaRes.rows.length === 0) {
+            const codigo = `#${Math.floor(100 + Math.random() * 900)}`;
+            const novaComanda = await client.query(
+                'INSERT INTO comandas (codigo, mesa_id, status) VALUES ($1, $2, $3) RETURNING id', [codigo, mesa_id, 'aberta']
+            );
+            comanda_id = novaComanda.rows[0].id;
+            await client.query('UPDATE mesas SET status = $1 WHERE id = $2', ['ocupada', mesa_id]);
+        } else {
+            comanda_id = comandaRes.rows[0].id;
+        }
+
+        for (const item of cart) {
+            await client.query(
+                `INSERT INTO comanda_itens (comanda_id, item_id_cache, nome_item, quantidade, preco_unitario, observacoes) 
+                 VALUES ($1, $2, $3, $4, $5, $6)`,
+                [comanda_id, item.dishId || 'manual', item.name, item.quantity, item.unitPrice, item.notes || '']
+            );
+        }
+
+        client.release();
+        atualizarPainel();
+        res.json({ success: true, message: 'Itens adicionados com sucesso!' });
+    } catch (error) {
+        if (client) client.release();
+        console.error("Erro ao adicionar itens manualmente:", error);
+        res.status(500).json({ error: 'Erro ao adicionar itens' });
+    }
+});
+
+// NOVA ROTA ADMINISTRATIVA: Apagar um item individual da comanda
+app.delete('/api/admin/comanda-item/:id', async (req, res) => {
+    const item_id = req.params.id;
+    let client;
+    try {
+        client = await pool.connect();
+        await client.query('DELETE FROM comanda_itens WHERE id = $1', [item_id]);
+        client.release();
+        atualizarPainel();
+        res.json({ success: true });
+    } catch (error) {
+        if (client) client.release();
+        console.error("Erro ao apagar item:", error);
+        res.status(500).json({ error: 'Erro ao apagar item' });
+    }
+});
+
+// 6. Histórico de Pedidos / Comandas Fechadas
 app.get('/api/historico', async (req, res) => {
     const { filtro } = req.query; // 'dia', 'semana', 'mes', 'todos'
     let client;
@@ -304,7 +394,7 @@ app.get('/api/historico', async (req, res) => {
     }
 });
 
-// 7. Estatísticas e Métricas (Blindado)
+// 7. Estatísticas e Métricas
 app.get('/api/estatisticas', async (req, res) => {
     let client;
     try {
