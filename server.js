@@ -255,7 +255,7 @@ app.post('/api/checkout', async (req, res) => {
     }
 });
 
-// 6. Histórico de Pedidos / Comandas Fechadas
+// 6. Histórico de Pedidos / Comandas Fechadas (Blindado com LEFT JOIN)
 app.get('/api/historico', async (req, res) => {
     const { filtro } = req.query; // 'dia', 'semana', 'mes', 'todos'
     let client;
@@ -263,14 +263,15 @@ app.get('/api/historico', async (req, res) => {
         client = await pool.connect();
         let query = `
             SELECT c.id, c.codigo, c.status, c.data_abertura, c.data_fechamento, 
-                   c.forma_pagamento, c.valor_total_final, m.numero as mesa_numero
+                   c.forma_pagamento, c.valor_total_final, 
+                   COALESCE(m.numero, 'N/A') as mesa_numero
             FROM comandas c 
-            JOIN mesas m ON c.mesa_id = m.id 
+            LEFT JOIN mesas m ON c.mesa_id = m.id 
             WHERE (LOWER(c.status) = 'fechada' OR c.data_fechamento IS NOT NULL)
         `;
         
         if (filtro === 'dia') {
-            query += ` AND c.data_fechamento >= CURRENT_DATE`;
+            query += ` AND c.data_fechamento >= NOW() - INTERVAL '1 day'`;
         } else if (filtro === 'semana') {
             query += ` AND c.data_fechamento >= NOW() - INTERVAL '7 days'`;
         } else if (filtro === 'mes') {
@@ -283,11 +284,15 @@ app.get('/api/historico', async (req, res) => {
         let comandas = result.rows;
 
         for (let comanda of comandas) {
-            const itensRes = await client.query(
-                'SELECT nome_item, quantidade, preco_unitario, observacoes FROM comanda_itens WHERE comanda_id = $1',
-                [comanda.id]
-            );
-            comanda.items = itensRes.rows;
+            try {
+                const itensRes = await client.query(
+                    'SELECT nome_item, quantidade, preco_unitario, observacoes FROM comanda_itens WHERE comanda_id = $1',
+                    [comanda.id]
+                );
+                comanda.items = itensRes.rows || [];
+            } catch (itemErr) {
+                comanda.items = [];
+            }
         }
 
         client.release();
@@ -299,29 +304,29 @@ app.get('/api/historico', async (req, res) => {
     }
 });
 
-// 7. Estatísticas e Métricas
+// 7. Estatísticas e Métricas (Blindado)
 app.get('/api/estatisticas', async (req, res) => {
     let client;
     try {
         client = await pool.connect();
 
-        const fatDia = await client.query(`SELECT SUM(valor_total_final) as total FROM comandas WHERE (LOWER(status) = 'fechada' OR data_fechamento IS NOT NULL) AND data_fechamento >= CURRENT_DATE`);
+        const fatDia = await client.query(`SELECT SUM(valor_total_final) as total FROM comandas WHERE (LOWER(status) = 'fechada' OR data_fechamento IS NOT NULL) AND data_fechamento >= NOW() - INTERVAL '1 day'`);
         const fatSemana = await client.query(`SELECT SUM(valor_total_final) as total FROM comandas WHERE (LOWER(status) = 'fechada' OR data_fechamento IS NOT NULL) AND data_fechamento >= NOW() - INTERVAL '7 days'`);
         const fatMes = await client.query(`SELECT SUM(valor_total_final) as total FROM comandas WHERE (LOWER(status) = 'fechada' OR data_fechamento IS NOT NULL) AND data_fechamento >= NOW() - INTERVAL '30 days'`);
 
         const itensVendidos = await client.query(`
-            SELECT nome_item, SUM(quantidade) as total_qtd 
+            SELECT ci.nome_item, SUM(ci.quantidade) as total_qtd 
             FROM comanda_itens ci
             JOIN comandas c ON ci.comanda_id = c.id
             WHERE (LOWER(c.status) = 'fechada' OR c.data_fechamento IS NOT NULL)
-            GROUP BY nome_item 
+            GROUP BY ci.nome_item 
             ORDER BY total_qtd DESC
         `);
 
         const horaPico = await client.query(`
             SELECT EXTRACT(HOUR FROM data_abertura) as hora, COUNT(*) as qtd
             FROM comandas
-            WHERE (LOWER(status) = 'fechada' OR data_fechamento IS NOT NULL)
+            WHERE (LOWER(status) = 'fechada' OR data_fechamento IS NOT NULL) AND data_abertura IS NOT NULL
             GROUP BY hora
             ORDER BY qtd DESC
             LIMIT 1
@@ -330,7 +335,7 @@ app.get('/api/estatisticas', async (req, res) => {
         const diaPico = await client.query(`
             SELECT TO_CHAR(data_abertura, 'Day') as dia, COUNT(*) as qtd
             FROM comandas
-            WHERE (LOWER(status) = 'fechada' OR data_fechamento IS NOT NULL)
+            WHERE (LOWER(status) = 'fechada' OR data_fechamento IS NOT NULL) AND data_abertura IS NOT NULL
             GROUP BY dia
             ORDER BY qtd DESC
             LIMIT 1
@@ -344,7 +349,7 @@ app.get('/api/estatisticas', async (req, res) => {
                 semana: fatSemana.rows[0]?.total || 0,
                 mes: fatMes.rows[0]?.total || 0
             },
-            itens: itensVendidos.rows,
+            itens: itensVendidos.rows || [],
             horaPico: horaPico.rows.length > 0 ? `${Math.floor(horaPico.rows[0].hora)}:00` : 'N/A',
             diaPico: diaPico.rows.length > 0 ? diaPico.rows[0].dia.trim() : 'N/A'
         });
