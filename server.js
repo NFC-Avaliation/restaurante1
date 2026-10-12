@@ -211,7 +211,6 @@ app.post('/api/checkout', async (req, res) => {
     try {
         client = await pool.connect();
         
-        // Fecha todas as comandas abertas desta mesa para garantir consistência
         if (mesa_id) {
             const comandasAbertas = await client.query('SELECT id FROM comandas WHERE mesa_id = $1 AND (LOWER(status) = \'aberta\' OR status IS NULL)', [mesa_id]);
             
@@ -244,7 +243,6 @@ app.post('/api/checkout', async (req, res) => {
             );
         }
 
-        // Liberta a mesa, limpa chamadas e apaga o token de sessão
         await client.query('UPDATE mesas SET status = $1, chamando_garcom = FALSE, token_sessao = NULL WHERE id = $2', ['livre', mesa_id]);
         
         client.release();
@@ -257,7 +255,7 @@ app.post('/api/checkout', async (req, res) => {
     }
 });
 
-// 6. Histórico de Pedidos / Comandas Fechadas (Blindado)
+// 6. Histórico de Pedidos / Comandas Fechadas
 app.get('/api/historico', async (req, res) => {
     const { filtro } = req.query; // 'dia', 'semana', 'mes', 'todos'
     let client;
@@ -301,7 +299,7 @@ app.get('/api/historico', async (req, res) => {
     }
 });
 
-// 7. Estatísticas e Métricas (Blindado)
+// 7. Estatísticas e Métricas
 app.get('/api/estatisticas', async (req, res) => {
     let client;
     try {
