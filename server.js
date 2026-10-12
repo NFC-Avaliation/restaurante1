@@ -210,19 +210,152 @@ app.post('/api/garcom/atender', async (req, res) => {
     }
 });
 
-// 5. Painel fecha a Comanda (Checkout) e invalida o token da mesa
+// 5. Painel fecha a Comanda (Checkout) com busca automática inteligente de segurança
 app.post('/api/checkout', async (req, res) => {
-    const { comanda_id, mesa_id, forma_pagamento, subtotal, taxa, desconto, final } = req.body;
+    let { comanda_id, mesa_id, forma_pagamento, subtotal, taxa, desconto, final } = req.body;
+    let client;
     try {
-        const client = await pool.connect();
+        client = await pool.connect();
         
-        await client.query(`
-            UPDATE comandas SET 
-            status = 'fechada', data_fechamento = NOW(), 
-            forma_pagamento = $1, subtotal = $2, taxa_servico = $3, desconto = $4, valor_total_final = $5
-            WHERE id = $6`,
-            [forma_pagamento, subtotal, taxa, desconto, final, comanda_id]
-        );
+        // Se o comanda_id não veio, busca automaticamente a comanda aberta da mesa
+        if (!comanda_id && mesa_id) {
+            const comandaAberta = await client.query('SELECT id FROM comandas WHERE mesa_id = $1 AND status = $2', [mesa_id, 'aberta']);
+            if (comandaAberta.rows.length > 0) {
+                comanda_id = comandaAberta.rows[0].id;
+            }
+        }
 
-        // Liberta a mesa, limpa chamadas e apaga o token de sessão (bloqueando acessos antigos)
-        await client.query('UPDATE mesas SET status = $1, chamando_garcom = FALSE, token_sessao = NULL
+        if (comanda_id) {
+            // Se o subtotal/final não veio calculado, calcula somando os itens da comanda
+            if (!final || final === 0) {
+                const itensSum = await client.query('SELECT SUM(quantidade * preco_unitario) as soma FROM comanda_itens WHERE comanda_id = $1', [comanda_id]);
+                subtotal = itensSum.rows[0]?.soma || 0;
+                final = subtotal;
+            }
+
+            await client.query(`
+                UPDATE comandas SET 
+                status = 'fechada', data_fechamento = NOW(), 
+                forma_pagamento = $1, subtotal = $2, taxa_servico = $3, desconto = $4, valor_total_final = $5
+                WHERE id = $6`,
+                [forma_pagamento || 'CARTAO', subtotal || 0, taxa || 0, desconto || 0, final || 0, comanda_id]
+            );
+        }
+
+        // Liberta a mesa, limpa chamadas e apaga o token de sessão
+        await client.query('UPDATE mesas SET status = $1, chamando_garcom = FALSE, token_sessao = NULL WHERE id = $2', ['livre', mesa_id]);
+        
+        client.release();
+        atualizarPainel();
+        res.json({ success: true });
+    } catch (error) {
+        if (client) client.release();
+        console.error("Erro ao fechar comanda:", error);
+        res.status(500).json({ error: 'Erro ao fechar comanda' });
+    }
+});
+
+// 6. Histórico de Pedidos / Comandas Fechadas (Blindado)
+app.get('/api/historico', async (req, res) => {
+    const { filtro } = req.query; // 'dia', 'semana', 'mes'
+    let client;
+    try {
+        client = await pool.connect();
+        let query = `
+            SELECT c.id, c.codigo, c.status, c.data_abertura, c.data_fechamento, 
+                   c.forma_pagamento, c.valor_total_final, m.numero as mesa_numero
+            FROM comandas c 
+            JOIN mesas m ON c.mesa_id = m.id 
+            WHERE c.status = 'fechada'
+        `;
+        
+        if (filtro === 'dia') {
+            query += ` AND c.data_fechamento >= CURRENT_DATE`;
+        } else if (filtro === 'semana') {
+            query += ` AND c.data_fechamento >= NOW() - INTERVAL '7 days'`;
+        } else if (filtro === 'mes') {
+            query += ` AND c.data_fechamento >= NOW() - INTERVAL '30 days'`;
+        }
+        
+        query += ` ORDER BY c.data_fechamento DESC LIMIT 150`;
+
+        const result = await client.query(query);
+        let comandas = result.rows;
+
+        for (let comanda of comandas) {
+            const itensRes = await client.query(
+                'SELECT nome_item, quantidade, preco_unitario, observacoes FROM comanda_itens WHERE comanda_id = $1',
+                [comanda.id]
+            );
+            comanda.items = itensRes.rows;
+        }
+
+        client.release();
+        res.json(comandas);
+    } catch (error) {
+        if (client) client.release();
+        console.error("Erro ao buscar histórico:", error);
+        res.status(500).json({ error: 'Erro ao buscar histórico' });
+    }
+});
+
+// 7. Estatísticas e Métricas (Blindado)
+app.get('/api/estatisticas', async (req, res) => {
+    let client;
+    try {
+        client = await pool.connect();
+
+        const fatDia = await client.query(`SELECT SUM(valor_total_final) as total FROM comandas WHERE status = 'fechada' AND data_fechamento >= CURRENT_DATE`);
+        const fatSemana = await client.query(`SELECT SUM(valor_total_final) as total FROM comandas WHERE status = 'fechada' AND data_fechamento >= NOW() - INTERVAL '7 days'`);
+        const fatMes = await client.query(`SELECT SUM(valor_total_final) as total FROM comandas WHERE status = 'fechada' AND data_fechamento >= NOW() - INTERVAL '30 days'`);
+
+        const itensVendidos = await client.query(`
+            SELECT nome_item, SUM(quantidade) as total_qtd 
+            FROM comanda_itens ci
+            JOIN comandas c ON ci.comanda_id = c.id
+            WHERE c.status = 'fechada'
+            GROUP BY nome_item 
+            ORDER BY total_qtd DESC
+        `);
+
+        const horaPico = await client.query(`
+            SELECT EXTRACT(HOUR FROM data_abertura) as hora, COUNT(*) as qtd
+            FROM comandas
+            WHERE status = 'fechada'
+            GROUP BY hora
+            ORDER BY qtd DESC
+            LIMIT 1
+        `);
+
+        const diaPico = await client.query(`
+            SELECT TO_CHAR(data_abertura, 'Day') as dia, COUNT(*) as qtd
+            FROM comandas
+            WHERE status = 'fechada'
+            GROUP BY dia
+            ORDER BY qtd DESC
+            LIMIT 1
+        `);
+
+        client.release();
+
+        res.json({
+            faturamento: {
+                dia: fatDia.rows[0]?.total || 0,
+                semana: fatSemana.rows[0]?.total || 0,
+                mes: fatMes.rows[0]?.total || 0
+            },
+            itens: itensVendidos.rows,
+            horaPico: horaPico.rows.length > 0 ? `${Math.floor(horaPico.rows[0].hora)}:00` : 'N/A',
+            diaPico: diaPico.rows.length > 0 ? diaPico.rows[0].dia.trim() : 'N/A'
+        });
+    } catch (error) {
+        if (client) client.release();
+        console.error("Erro ao calcular estatísticas:", error);
+        res.status(500).json({ error: 'Erro ao calcular estatísticas' });
+    }
+});
+
+const PORT = process.env.PORT || 3000;
+server.listen(PORT, () => {
+    console.log(`Servidor a correr na porta ${PORT}`);
+});
