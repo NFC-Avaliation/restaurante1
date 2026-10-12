@@ -38,7 +38,8 @@ app.post('/api/mesa/sessao', async (req, res) => {
     const { mesa_numero } = req.body;
     try {
         const client = await pool.connect();
-        const mesaRes = await client.query('SELECT id, status, token_sessao FROM mesas WHERE numero = $1', [mesa_numero]);
+        // Utiliza TRIM para garantir correspondência exata independentemente de espaços ou zeros
+        const mesaRes = await client.query('SELECT id, status, token_sessao FROM mesas WHERE TRIM(numero) = TRIM($1)', [mesa_numero]);
         
         if (mesaRes.rows.length === 0) {
             client.release();
@@ -70,7 +71,7 @@ app.post('/api/pedidos', async (req, res) => {
         const client = await pool.connect();
         
         // Acha a mesa e valida o token de segurança
-        const mesaRes = await client.query('SELECT id, token_sessao, status FROM mesas WHERE numero = $1', [mesa_numero]);
+        const mesaRes = await client.query('SELECT id, token_sessao, status FROM mesas WHERE TRIM(numero) = TRIM($1)', [mesa_numero]);
         if (mesaRes.rows.length === 0) {
             client.release();
             return res.status(404).json({ error: 'Mesa não encontrada' });
@@ -129,7 +130,7 @@ app.post('/api/garcom', async (req, res) => {
 
     try {
         const client = await pool.connect();
-        const mesaRes = await client.query('SELECT id, token_sessao FROM mesas WHERE numero = $1', [mesa_numero]);
+        const mesaRes = await client.query('SELECT id, token_sessao FROM mesas WHERE TRIM(numero) = TRIM($1)', [mesa_numero]);
         
         if (mesaRes.rows.length > 0) {
             const mesa = mesaRes.rows[0];
