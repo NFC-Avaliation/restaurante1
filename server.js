@@ -38,7 +38,6 @@ app.post('/api/mesa/sessao', async (req, res) => {
     const { mesa_numero } = req.body;
     try {
         const client = await pool.connect();
-        // Utiliza TRIM para garantir correspondência exata independentemente de espaços ou zeros
         const mesaRes = await client.query('SELECT id, status, token_sessao FROM mesas WHERE TRIM(numero) = TRIM($1)', [mesa_numero]);
         
         if (mesaRes.rows.length === 0) {
@@ -49,7 +48,6 @@ app.post('/api/mesa/sessao', async (req, res) => {
         let mesa = mesaRes.rows[0];
         let token = mesa.token_sessao;
 
-        // Se a mesa está livre ou não tem token ativo, gera um novo token de segurança
         if (!token || mesa.status === 'livre') {
             token = 'tok_' + Math.random().toString(36).substring(2) + Date.now().toString(36);
             await client.query('UPDATE mesas SET token_sessao = $1 WHERE id = $2', [token, mesa.id]);
@@ -70,7 +68,6 @@ app.post('/api/pedidos', async (req, res) => {
     try {
         const client = await pool.connect();
         
-        // Acha a mesa e valida o token de segurança
         const mesaRes = await client.query('SELECT id, token_sessao, status FROM mesas WHERE TRIM(numero) = TRIM($1)', [mesa_numero]);
         if (mesaRes.rows.length === 0) {
             client.release();
@@ -79,7 +76,6 @@ app.post('/api/pedidos', async (req, res) => {
         
         const mesa = mesaRes.rows[0];
 
-        // Valida se o token do telemóvel corresponde ao token ativo da mesa
         if (!mesa.token_sessao || mesa.token_sessao !== token_sessao) {
             client.release();
             return res.status(403).json({ error: 'Sessão inválida ou expirada para esta mesa.' });
@@ -87,14 +83,13 @@ app.post('/api/pedidos', async (req, res) => {
 
         const mesa_id = mesa.id;
 
-        // Verifica se já tem comanda aberta, caso contrário cria uma
-        let comandaRes = await client.query('SELECT id FROM comandas WHERE mesa_id = $1 AND status = $2', [mesa_id, 'aberta']);
+        let comandaRes = await client.query('SELECT id FROM comandas WHERE mesa_id = $1 AND (LOWER(status) = \'aberta\' OR status IS NULL)', [mesa_id]);
         let comanda_id;
 
         if (comandaRes.rows.length === 0) {
             const codigo = `#${Math.floor(100 + Math.random() * 900)}`;
             const novaComanda = await client.query(
-                'INSERT INTO comandas (codigo, mesa_id) VALUES ($1, $2) RETURNING id', [codigo, mesa_id]
+                'INSERT INTO comandas (codigo, mesa_id, status) VALUES ($1, $2, $3) RETURNING id', [codigo, mesa_id, 'aberta']
             );
             comanda_id = novaComanda.rows[0].id;
             
@@ -103,7 +98,6 @@ app.post('/api/pedidos', async (req, res) => {
             comanda_id = comandaRes.rows[0].id;
         }
 
-        // Insere os itens do carrinho
         for (const item of cart) {
             await client.query(
                 `INSERT INTO comanda_itens (comanda_id, item_id_cache, nome_item, quantidade, preco_unitario, observacoes) 
@@ -171,7 +165,7 @@ app.get('/api/mesas', async (req, res) => {
                 m.id as mesa_id, m.numero, m.status, m.chamando_garcom, m.hora_ultimo_chamado,
                 c.id as comanda_id, c.codigo as comanda_codigo, c.data_abertura
             FROM mesas m
-            LEFT JOIN comandas c ON m.id = c.mesa_id AND c.status = 'aberta'
+            LEFT JOIN comandas c ON m.id = c.mesa_id AND (LOWER(c.status) = 'aberta' OR c.status IS NULL)
         `);
 
         let mesas = mesasRes.rows;
@@ -210,35 +204,43 @@ app.post('/api/garcom/atender', async (req, res) => {
     }
 });
 
-// 5. Painel fecha a Comanda (Checkout) com busca automática inteligente de segurança
+// 5. Painel fecha a Comanda (Checkout) robusto e automático
 app.post('/api/checkout', async (req, res) => {
     let { comanda_id, mesa_id, forma_pagamento, subtotal, taxa, desconto, final } = req.body;
     let client;
     try {
         client = await pool.connect();
         
-        // Se o comanda_id não veio, busca automaticamente a comanda aberta da mesa
-        if (!comanda_id && mesa_id) {
-            const comandaAberta = await client.query('SELECT id FROM comandas WHERE mesa_id = $1 AND status = $2', [mesa_id, 'aberta']);
-            if (comandaAberta.rows.length > 0) {
-                comanda_id = comandaAberta.rows[0].id;
-            }
-        }
+        // Fecha todas as comandas abertas desta mesa para garantir consistência
+        if (mesa_id) {
+            const comandasAbertas = await client.query('SELECT id FROM comandas WHERE mesa_id = $1 AND (LOWER(status) = \'aberta\' OR status IS NULL)', [mesa_id]);
+            
+            for (let com of comandasAbertas.rows) {
+                let currentComandaId = com.id;
+                
+                const itensSum = await client.query('SELECT SUM(quantidade * preco_unitario) as soma FROM comanda_itens WHERE comanda_id = $1', [currentComandaId]);
+                let comSubtotal = itensSum.rows[0]?.soma || subtotal || 0;
+                let comFinal = comSubtotal - (desconto || 0) + (taxa || 0);
 
-        if (comanda_id) {
-            // Se o subtotal/final não veio calculado, calcula somando os itens da comanda
-            if (!final || final === 0) {
-                const itensSum = await client.query('SELECT SUM(quantidade * preco_unitario) as soma FROM comanda_itens WHERE comanda_id = $1', [comanda_id]);
-                subtotal = itensSum.rows[0]?.soma || 0;
-                final = subtotal;
+                await client.query(`
+                    UPDATE comandas SET 
+                    status = 'fechada', data_fechamento = NOW(), 
+                    forma_pagamento = $1, subtotal = $2, taxa_servico = $3, desconto = $4, valor_total_final = $5
+                    WHERE id = $6`,
+                    [forma_pagamento || 'CARTAO', comSubtotal, taxa || 0, desconto || 0, comFinal, currentComandaId]
+                );
             }
+        } else if (comanda_id) {
+            const itensSum = await client.query('SELECT SUM(quantidade * preco_unitario) as soma FROM comanda_itens WHERE comanda_id = $1', [comanda_id]);
+            let comSubtotal = itensSum.rows[0]?.soma || subtotal || 0;
+            let comFinal = comSubtotal - (desconto || 0) + (taxa || 0);
 
             await client.query(`
                 UPDATE comandas SET 
                 status = 'fechada', data_fechamento = NOW(), 
                 forma_pagamento = $1, subtotal = $2, taxa_servico = $3, desconto = $4, valor_total_final = $5
                 WHERE id = $6`,
-                [forma_pagamento || 'CARTAO', subtotal || 0, taxa || 0, desconto || 0, final || 0, comanda_id]
+                [forma_pagamento || 'CARTAO', comSubtotal, taxa || 0, desconto || 0, comFinal, comanda_id]
             );
         }
 
@@ -257,7 +259,7 @@ app.post('/api/checkout', async (req, res) => {
 
 // 6. Histórico de Pedidos / Comandas Fechadas (Blindado)
 app.get('/api/historico', async (req, res) => {
-    const { filtro } = req.query; // 'dia', 'semana', 'mes'
+    const { filtro } = req.query; // 'dia', 'semana', 'mes', 'todos'
     let client;
     try {
         client = await pool.connect();
@@ -266,7 +268,7 @@ app.get('/api/historico', async (req, res) => {
                    c.forma_pagamento, c.valor_total_final, m.numero as mesa_numero
             FROM comandas c 
             JOIN mesas m ON c.mesa_id = m.id 
-            WHERE c.status = 'fechada'
+            WHERE (LOWER(c.status) = 'fechada' OR c.data_fechamento IS NOT NULL)
         `;
         
         if (filtro === 'dia') {
@@ -305,15 +307,15 @@ app.get('/api/estatisticas', async (req, res) => {
     try {
         client = await pool.connect();
 
-        const fatDia = await client.query(`SELECT SUM(valor_total_final) as total FROM comandas WHERE status = 'fechada' AND data_fechamento >= CURRENT_DATE`);
-        const fatSemana = await client.query(`SELECT SUM(valor_total_final) as total FROM comandas WHERE status = 'fechada' AND data_fechamento >= NOW() - INTERVAL '7 days'`);
-        const fatMes = await client.query(`SELECT SUM(valor_total_final) as total FROM comandas WHERE status = 'fechada' AND data_fechamento >= NOW() - INTERVAL '30 days'`);
+        const fatDia = await client.query(`SELECT SUM(valor_total_final) as total FROM comandas WHERE (LOWER(status) = 'fechada' OR data_fechamento IS NOT NULL) AND data_fechamento >= CURRENT_DATE`);
+        const fatSemana = await client.query(`SELECT SUM(valor_total_final) as total FROM comandas WHERE (LOWER(status) = 'fechada' OR data_fechamento IS NOT NULL) AND data_fechamento >= NOW() - INTERVAL '7 days'`);
+        const fatMes = await client.query(`SELECT SUM(valor_total_final) as total FROM comandas WHERE (LOWER(status) = 'fechada' OR data_fechamento IS NOT NULL) AND data_fechamento >= NOW() - INTERVAL '30 days'`);
 
         const itensVendidos = await client.query(`
             SELECT nome_item, SUM(quantidade) as total_qtd 
             FROM comanda_itens ci
             JOIN comandas c ON ci.comanda_id = c.id
-            WHERE c.status = 'fechada'
+            WHERE (LOWER(c.status) = 'fechada' OR c.data_fechamento IS NOT NULL)
             GROUP BY nome_item 
             ORDER BY total_qtd DESC
         `);
@@ -321,7 +323,7 @@ app.get('/api/estatisticas', async (req, res) => {
         const horaPico = await client.query(`
             SELECT EXTRACT(HOUR FROM data_abertura) as hora, COUNT(*) as qtd
             FROM comandas
-            WHERE status = 'fechada'
+            WHERE (LOWER(status) = 'fechada' OR data_fechamento IS NOT NULL)
             GROUP BY hora
             ORDER BY qtd DESC
             LIMIT 1
@@ -330,7 +332,7 @@ app.get('/api/estatisticas', async (req, res) => {
         const diaPico = await client.query(`
             SELECT TO_CHAR(data_abertura, 'Day') as dia, COUNT(*) as qtd
             FROM comandas
-            WHERE status = 'fechada'
+            WHERE (LOWER(status) = 'fechada' OR data_fechamento IS NOT NULL)
             GROUP BY dia
             ORDER BY qtd DESC
             LIMIT 1
