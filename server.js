@@ -20,6 +20,9 @@ const pool = new Pool({
     ssl: { rejectUnauthorized: false }
 });
 
+// URL do seu Front-end hospedado (substitua pelo seu link real ou use variável de ambiente)
+const FRONTEND_URL = process.env.FRONTEND_URL || 'https://seu-usuario.github.io/seu-repositorio';
+
 // WebSockets em tempo real
 io.on('connection', (socket) => {
     console.log(`Novo cliente ligado: ${socket.id}`);
@@ -33,7 +36,44 @@ function atualizarPainel() {
     io.emit('atualizacao_dados');
 }
 
-// 0. Gerar ou recuperar Sessão Segura da Mesa (NFC)
+// ==========================================
+// ROTA NFC: Ponto de entrada via leitura da Tag
+// ==========================================
+app.get('/api/mesa/acessar', async (req, res) => {
+    const { mesa } = req.query;
+    if (!mesa) {
+        return res.status(400).send('Número da mesa não especificado.');
+    }
+
+    try {
+        const client = await pool.connect();
+        const mesaRes = await client.query('SELECT id, status, token_sessao FROM mesas WHERE TRIM(numero) = TRIM($1)', [mesa]);
+        
+        if (mesaRes.rows.length === 0) {
+            client.release();
+            return res.status(404).send('Mesa não encontrada no sistema.');
+        }
+
+        let mesaObj = mesaRes.rows[0];
+        let token = mesaObj.token_sessao;
+
+        // Se a mesa estiver livre ou sem token ativo, gera um novo token de sessão seguro
+        if (!token || mesaObj.status === 'livre') {
+            token = 'tok_' + Math.random().toString(36).substring(2) + Date.now().toString(36);
+            await client.query('UPDATE mesas SET token_sessao = $1 WHERE id = $2', [token, mesaObj.id]);
+        }
+
+        client.release();
+
+        // Redireciona o cliente para o cardápio oficial contendo a mesa e o token gerado
+        res.redirect(`${FRONTEND_URL}/cardapio.html?mesa=${mesa}&token=${token}`);
+    } catch (error) {
+        console.error("Erro ao processar acesso NFC:", error);
+        res.status(500).send('Erro interno ao acessar a mesa.');
+    }
+});
+
+// 0. Gerar ou recuperar Sessão Segura da Mesa (Caso o front precise validar)
 app.post('/api/mesa/sessao', async (req, res) => {
     const { mesa_numero } = req.body;
     try {
@@ -61,7 +101,7 @@ app.post('/api/mesa/sessao', async (req, res) => {
     }
 });
 
-// 1. Cliente faz um Novo Pedido (com validação de token)
+// 1. Cliente faz um Novo Pedido (com validação rigorosa de token)
 app.post('/api/pedidos', async (req, res) => {
     const { mesa_numero, cart, token_sessao } = req.body;
     
@@ -76,9 +116,10 @@ app.post('/api/pedidos', async (req, res) => {
         
         const mesa = mesaRes.rows[0];
 
+        // Se o token não bater ou a comanda estiver fechada/limpa, barra o acesso
         if (!mesa.token_sessao || mesa.token_sessao !== token_sessao) {
             client.release();
-            return res.status(403).json({ error: 'Sessão inválida ou expirada para esta mesa.' });
+            return res.status(403).json({ error: 'Sessão inválida, expirada ou comanda encerrada.' });
         }
 
         const mesa_id = mesa.id;
@@ -131,7 +172,7 @@ app.post('/api/garcom', async (req, res) => {
             
             if (!mesa.token_sessao || mesa.token_sessao !== token_sessao) {
                 client.release();
-                return res.status(403).json({ error: 'Sessão inválida.' });
+                return res.status(403).json({ error: 'Sessão inválida ou expirada.' });
             }
 
             const mesa_id = mesa.id;
@@ -204,7 +245,7 @@ app.post('/api/garcom/atender', async (req, res) => {
     }
 });
 
-// 5. Painel fecha a Comanda (Checkout)
+// 5. Painel fecha a Comanda (Checkout) - Limpa o token da mesa
 app.post('/api/checkout', async (req, res) => {
     let { comanda_id, mesa_id, forma_pagamento, subtotal, taxa, desconto, final } = req.body;
     let client;
@@ -243,6 +284,7 @@ app.post('/api/checkout', async (req, res) => {
             );
         }
 
+        // IMPORTANTE: Zera o token_sessao para invalidar o acesso de quem estiver com o link antigo
         await client.query('UPDATE mesas SET status = $1, chamando_garcom = FALSE, token_sessao = NULL WHERE id = $2', ['livre', mesa_id]);
         
         client.release();
@@ -255,7 +297,7 @@ app.post('/api/checkout', async (req, res) => {
     }
 });
 
-// NOVA ROTA ADMINISTRATIVA: Cancelar/Limpar Mesa sem ir para o histórico
+// NOVA ROTA ADMINISTRATIVA: Cancelar/Limpar Mesa sem ir para o histórico - Limpa o token da mesa
 app.post('/api/admin/mesa/cancelar', async (req, res) => {
     let { mesa_id, comanda_id } = req.body;
     let client;
@@ -270,12 +312,12 @@ app.post('/api/admin/mesa/cancelar', async (req, res) => {
         }
 
         if (comanda_id) {
-            // Apaga itens e comanda para não gerar histórico nem estatísticas
             await client.query('DELETE FROM comanda_itens WHERE comanda_id = $1', [comanda_id]);
             await client.query('DELETE FROM comandas WHERE id = $1', [comanda_id]);
         }
 
         if (mesa_id) {
+            // Zera o token_sessao para invalidar os celulares conectados
             await client.query('UPDATE mesas SET status = $1, chamando_garcom = FALSE, token_sessao = NULL WHERE id = $2', ['livre', mesa_id]);
         }
 
@@ -289,7 +331,7 @@ app.post('/api/admin/mesa/cancelar', async (req, res) => {
     }
 });
 
-// NOVA ROTA ADMINISTRATIVA: Adicionar itens manualmente a uma mesa (mesmo vazia)
+// NOVA ROTA ADMINISTRATIVA: Adicionar itens manualmente a uma mesa
 app.post('/api/admin/mesa/adicionar-itens', async (req, res) => {
     let { mesa_id, cart } = req.body;
     let client;
@@ -347,7 +389,7 @@ app.delete('/api/admin/comanda-item/:id', async (req, res) => {
 
 // 6. Histórico de Pedidos / Comandas Fechadas
 app.get('/api/historico', async (req, res) => {
-    const { filtro } = req.query; // 'dia', 'semana', 'mes', 'todos'
+    const { filtro } = req.query;
     let client;
     try {
         client = await pool.connect();
