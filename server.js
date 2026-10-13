@@ -21,7 +21,7 @@ const pool = new Pool({
 });
 
 // URL do seu Front-end hospedado (substitua pelo seu link real ou use variável de ambiente)
-const FRONTEND_URL = process.env.FRONTEND_URL || 'https://seu-usuario.github.io/seu-repositorio';
+const FRONTEND_URL = process.env.FRONTEND_URL || 'https://nfc-avaliation.github.io/Restaurante1-frontend';
 
 // WebSockets em tempo real
 io.on('connection', (socket) => {
