@@ -66,7 +66,7 @@ app.get('/api/mesa/acessar', async (req, res) => {
         client.release();
 
         // Redireciona o cliente para o cardápio oficial contendo a mesa e o token gerado
-        res.redirect(`${FRONTEND_URL}/cardapio.html?mesa=${mesa}&token=${token}`);
+        res.redirect(`${FRONTEND_URL}/index.html?mesa=${mesa}&token=${token}`);
     } catch (error) {
         console.error("Erro ao processar acesso NFC:", error);
         res.status(500).send('Erro interno ao acessar a mesa.');
