@@ -44,13 +44,13 @@ app.use(express.json());
 // 2. TRAVA DE SEGURANÇA: RATE LIMITING (Anti-DDoS)
 // ==========================================
 // Limita cada IP a 100 requisições por minuto. Impede que robôs derrubem a API.
-//const apiLimiter = rateLimit({
-//    windowMs: 1 * 60 * 1000, // 1 minuto
-//    max: 100,
-//    message: { error: 'Muitas requisições originadas deste IP. Aguarde um minuto.' },
-//    validate: { trustProxy: false } // <-- ADICIONE ESTA LINHA AQUI
-//});
-//app.use('/api/', apiLimiter);
+const apiLimiter = rateLimit({
+    windowMs: 1 * 60 * 1000, // 1 minuto
+    max: 100,
+    message: { error: 'Muitas requisições originadas deste IP. Aguarde um minuto.' },
+    validate: { trustProxy: false } // Impede bloqueios errados do proxy no Render
+});
+app.use('/api/', apiLimiter);
 
 // Configuração do Socket.io com CORS explícito e protegido
 const io = new Server(server, {
@@ -198,10 +198,11 @@ app.post('/api/pedidos', async (req, res) => {
             comanda_id = comandaRes.rows[0].id;
         }
 
+        // SOLUÇÃO APLICADA: Inserção do ID do Prato (item_id_cache) no banco de dados com fallback de segurança
         for (const item of cart) {
             await client.query(
-                `INSERT INTO comanda_itens (comanda_id, nome_item, quantidade, preco_unitario, observacoes) VALUES ($1, $2, $3, $4, $5)`,
-                [comanda_id, item.name, item.quantity, item.unitPrice, item.notes || '']
+                `INSERT INTO comanda_itens (comanda_id, item_id_cache, nome_item, quantidade, preco_unitario, observacoes) VALUES ($1, $2, $3, $4, $5, $6)`,
+                [comanda_id, item.dishId || 'item', item.name, item.quantity, item.unitPrice, item.notes || '']
             );
         }
 
@@ -214,7 +215,8 @@ app.post('/api/pedidos', async (req, res) => {
         if (client) await client.query('ROLLBACK');
         if (error.message === 'MESA_NOT_FOUND') return res.status(404).json({ error: 'Mesa não encontrada' });
         if (error.message === 'INVALID_SESSION') return res.status(403).json({ error: 'Sessão inválida' });
-        console.error('ERRO FATAL NO PEDIDO:', error);
+        
+        console.error('ERRO FATAL NO PEDIDO:', error); // Mantido para diagnóstico fácil
         res.status(500).json({ error: 'Erro ao processar pedido' });
     } finally {
         if (client) client.release();
@@ -239,6 +241,7 @@ app.post('/api/garcom', async (req, res) => {
             res.status(404).json({ error: 'Mesa não encontrada' });
         }
     } catch (error) {
+        console.error(error);
         res.status(500).json({ error: 'Erro ao chamar garçom' });
     } finally {
         if (client) client.release();
@@ -357,9 +360,10 @@ app.post('/api/admin/mesa/adicionar-itens', verifyAdminToken, async (req, res) =
             comanda_id = comandaRes.rows[0].id;
         }
 
+        // SOLUÇÃO APLICADA AQUI TAMBÉM: Inserção do ID do Prato pelo Painel Admin
         for (const item of cart) {
-            await client.query(`INSERT INTO comanda_itens (comanda_id, nome_item, quantidade, preco_unitario, observacoes) VALUES ($1, $2, $3, $4, $5)`,
-                [comanda_id, item.name, item.quantity, item.unitPrice, item.notes || '']);
+            await client.query(`INSERT INTO comanda_itens (comanda_id, item_id_cache, nome_item, quantidade, preco_unitario, observacoes) VALUES ($1, $2, $3, $4, $5, $6)`,
+                [comanda_id, item.dishId || 'item', item.name, item.quantity, item.unitPrice, item.notes || '']);
         }
 
         await client.query('COMMIT');
