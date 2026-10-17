@@ -13,17 +13,29 @@ const server = http.createServer(app);
 // ==========================================
 // 1. TRAVA DE SEGURANÇA: CORS RESTRITO
 // ==========================================
-// Só permite requisições do seu site (e localhost para os seus testes)
-const ALLOWED_ORIGIN = process.env.FRONTEND_URL || 'https://nfc-avaliation.github.io';
+// URL principal do Front-end (usada para os redirecionamentos de QR Code/NFC)
+const FRONTEND_URL = process.env.FRONTEND_URL || 'https://nfc-avaliation.github.io';
+
+// Lista branca (Whitelist) de domínios permitidos a aceder à sua API
+const allowedOrigins = [
+    'http://localhost:3000',
+    'http://127.0.0.1:5500',
+    'https://nfc-avaliation.github.io',
+    FRONTEND_URL
+];
+
 const corsOptions = {
     origin: function (origin, callback) {
-        if (!origin || origin.startsWith(ALLOWED_ORIGIN) || origin.includes('localhost')) {
+        // Se a origem estiver na lista ou não houver origem (ex: Postman/Navegador direto), permite.
+        if (!origin || allowedOrigins.includes(origin)) {
             callback(null, true);
         } else {
             callback(new Error('Acesso bloqueado pelo CORS'));
         }
-    }
+    },
+    credentials: true // Permite o envio de cabeçalhos de autorização
 };
+
 app.use(cors(corsOptions));
 app.use(express.json());
 
@@ -38,12 +50,16 @@ const apiLimiter = rateLimit({
 });
 app.use('/api/', apiLimiter);
 
-// Configuração do Socket com CORS protegido
+// Configuração do Socket.io com CORS explícito e protegido
 const io = new Server(server, {
-    cors: { origin: corsOptions.origin }
+    cors: {
+        origin: allowedOrigins,
+        methods: ["GET", "POST", "PUT", "DELETE", "OPTIONS"],
+        credentials: true
+    }
 });
 
-// Configurações do Sistema
+// Configurações do Sistema de Banco de Dados
 const pool = new Pool({
     connectionString: process.env.DATABASE_URL || 'postgresql://postgres:JTSZTBKgDTGCZ5LF@db.jfyjrtllkqmvixosrtof.supabase.co:5432/postgres',
     ssl: { rejectUnauthorized: false },
@@ -55,7 +71,7 @@ pool.on('error', (err) => {
     console.error('Erro inesperado no banco de dados:', err);
 });
 
-// Credenciais de Admin Seguras (Idealmente vindas do .env)
+// Credenciais de Admin Seguras
 const ADMIN_USER = process.env.ADMIN_USER || 'admin';
 const ADMIN_PASS = process.env.ADMIN_PASS || 'admin123';
 const JWT_SECRET = process.env.JWT_SECRET || 'chave_super_secreta_restaurante_2026';
@@ -121,7 +137,8 @@ app.get('/api/mesa/acessar', async (req, res) => {
             await client.query('UPDATE mesas SET token_sessao = $1 WHERE id = $2', [token, mesaObj.id]);
         }
 
-        res.redirect(`${ALLOWED_ORIGIN}/index.html?mesa=${mesa}&token=${token}`);
+        // Usa a variável FRONTEND_URL definida no topo
+        res.redirect(`${FRONTEND_URL}/index.html?mesa=${mesa}&token=${token}`);
     } catch (error) {
         res.status(500).send('Erro interno ao acessar a mesa.');
     } finally {
