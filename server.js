@@ -10,7 +10,7 @@ const rateLimit = require('express-rate-limit'); // Contra ataques de Spam/DDoS
 const app = express();
 const server = http.createServer(app);
 
-app.set('trust proxy', 1);
+app.set('trust proxy', true);
 // ==========================================
 // 1. TRAVA DE SEGURANÇA: CORS RESTRITO
 // ==========================================
