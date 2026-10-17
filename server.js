@@ -44,13 +44,13 @@ app.use(express.json());
 // 2. TRAVA DE SEGURANÇA: RATE LIMITING (Anti-DDoS)
 // ==========================================
 // Limita cada IP a 100 requisições por minuto. Impede que robôs derrubem a API.
-const apiLimiter = rateLimit({
-    windowMs: 1 * 60 * 1000, // 1 minuto
-    max: 100,
-    message: { error: 'Muitas requisições originadas deste IP. Aguarde um minuto.' },
-    validate: { trustProxy: false } // <-- ADICIONE ESTA LINHA AQUI
-});
-app.use('/api/', apiLimiter);
+//const apiLimiter = rateLimit({
+//    windowMs: 1 * 60 * 1000, // 1 minuto
+//    max: 100,
+//    message: { error: 'Muitas requisições originadas deste IP. Aguarde um minuto.' },
+//    validate: { trustProxy: false } // <-- ADICIONE ESTA LINHA AQUI
+//});
+//app.use('/api/', apiLimiter);
 
 // Configuração do Socket.io com CORS explícito e protegido
 const io = new Server(server, {
