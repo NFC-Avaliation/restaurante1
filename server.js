@@ -214,6 +214,7 @@ app.post('/api/pedidos', async (req, res) => {
         if (client) await client.query('ROLLBACK');
         if (error.message === 'MESA_NOT_FOUND') return res.status(404).json({ error: 'Mesa não encontrada' });
         if (error.message === 'INVALID_SESSION') return res.status(403).json({ error: 'Sessão inválida' });
+        console.error('ERRO FATAL NO PEDIDO:', error);
         res.status(500).json({ error: 'Erro ao processar pedido' });
     } finally {
         if (client) client.release();
