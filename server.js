@@ -10,7 +10,7 @@ const rateLimit = require('express-rate-limit'); // Contra ataques de Spam/DDoS
 const app = express();
 const server = http.createServer(app);
 
-app.set('trust proxy', true);
+app.set('trust proxy', 1);
 // ==========================================
 // 1. TRAVA DE SEGURANÇA: CORS RESTRITO
 // ==========================================
@@ -47,7 +47,8 @@ app.use(express.json());
 const apiLimiter = rateLimit({
     windowMs: 1 * 60 * 1000, // 1 minuto
     max: 100,
-    message: { error: 'Muitas requisições originadas deste IP. Aguarde um minuto.' }
+    message: { error: 'Muitas requisições originadas deste IP. Aguarde um minuto.' },
+    validate: { trustProxy: false } // <-- ADICIONE ESTA LINHA AQUI
 });
 app.use('/api/', apiLimiter);
 
